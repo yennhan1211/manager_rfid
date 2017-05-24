@@ -18,6 +18,8 @@ GND     = GND
 3.3V    = 3.3V
 */
 
+#define BOARD_TYPE              1
+
 #define RST_PIN                 5  // RST-PIN für RC522 - RFID - SPI - Modul GPIO5
 #define SS_PIN                  16  // SDA-PIN für RC522 - RFID - SPI - Modul GPIO4
 
@@ -60,18 +62,19 @@ volatile byte state_button = false;
 
 byte card_uid[4] = {0xA1, 0x32, 0x71, 0x8B};
 
-uint8_t cardNotFoundCount = 0;
-uint8_t cardFoundCount  = 0;
+uint8_t g_cardNotFoundCount = 0;
+uint8_t g_cardFoundCount  = 0;
 
-uint32_t prevLedUpdateTime = 0;
-uint32_t prevCardScanTime = 0;
-uint32_t prevMinuteTime = 0;
-uint32_t prevSendBroadcastCmdTime = 0;
-uint32_t prevSendPingTime = 0;
-uint32_t operateTime = 0;
-uint32_t pingSendCount = 0;
-uint32_t washTime = 0;
+uint32_t g_prevLedUpdateTime = 0;
+uint32_t g_prevCardScanTime = 0;
+uint32_t g_prevMinuteTime = 0;
+uint32_t g_prevSendBroadcastCmdTime = 0;
+uint32_t g_prevSendPingTime = 0;
+uint32_t g_operateTime = 0;
+uint32_t g_pingSendCount = 0;
+uint32_t g_washTime = 0;
 uint32_t deviceID = 0;
+uint32_t g_cardID = 0;
 
 uint8_t ledData = 0;
 uint8_t ledCtrlData = 0;
@@ -170,6 +173,8 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
             {
                 Serial.printf("[WSc] Disconnected!\n");
                 isServerConnected = false;
+                isGotIpServer = false;
+                webSocket.disconnect();
             }
             break;
         case WStype_CONNECTED:
@@ -181,7 +186,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
             break;
         case WStype_TEXT:
             {
-                pingSendCount = 0;
+                g_pingSendCount = 0;
                 Serial.printf("[WSc] get text: %s\n", payload);
             }
             break;
@@ -194,6 +199,7 @@ void loop() {
 
     uint32_t curTime = millis();
     uint32_t packetSize = 0;
+    uint32_t tmpCardId = 0;
 
     if (WiFi.status() == WL_CONNECTED && isWifiConnected == false)
     {
@@ -221,23 +227,35 @@ void loop() {
         webSocket.loop();
     }
 
-    if (curTime - prevCardScanTime >= CARD_SCAN_INTERLVAL) // every 0.1s
+    if (curTime - g_prevCardScanTime >= CARD_SCAN_INTERLVAL) // every 0.1s
     {
-        prevCardScanTime = curTime;
+        g_prevCardScanTime = curTime;
 
         if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial())
         {
-            //Show UID on serial monitor
-            //Serial.print("UID tag :");
-            String content= "";
-            byte letter;
+            tmpCardId = 0;
             for (byte i = 0; i < mfrc522.uid.size; i++)
             {
-               Serial.print(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " ");
-               Serial.print(mfrc522.uid.uidByte[i], HEX);
+                tmpCardId |= (mfrc522.uid.uidByte[i] << (i * 8));
+                // Serial.print(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " ");
+                // Serial.print(mfrc522.uid.uidByte[i], HEX);
             }
-            isNewCardFound = true;
-            Serial.println();
+            if (tmpCardId != g_cardID)
+            {
+                g_cardID = tmpCardId;
+                isNewCardFound = true;
+                g_cardFoundCount = 0;
+            }
+
+            // Serial.println();
+        }
+    }
+    else
+    {
+        if (g_cardFoundCount++ >= (CARD_SCAN_INTERLVAL * 50)) // 5s
+        {
+            g_cardFoundCount = 0;
+            g_cardID = 0;
         }
     }
 
@@ -245,9 +263,9 @@ void loop() {
     {
         if (!isGotIpServer)
         {
-            if (curTime - prevSendBroadcastCmdTime >= SEND_BROADCAST_CMD)
+            if (curTime - g_prevSendBroadcastCmdTime >= SEND_BROADCAST_CMD)
             {
-                prevSendBroadcastCmdTime = curTime;
+                g_prevSendBroadcastCmdTime = curTime;
                 Serial.println("broadcast msg");
                 // send broadcast cmd
                 udpClient.beginPacket(broadcastIp, UDP_PORT);
@@ -286,14 +304,14 @@ void loop() {
         }
         else
         {
-            // if (pingSendCount >= 10 && isServerConnected)
-            // {
-            //     pingSendCount = 0;
-            //     webSocket.disconnect();
-            //     isServerConnected = false;
-            //     isGotIpServer = false;
-            //     Serial.println("out of ping count");
-            // }
+            if (g_pingSendCount >= 10 && isServerConnected)
+            {
+                g_pingSendCount = 0;
+                webSocket.disconnect();
+                isServerConnected = false;
+                isGotIpServer = false;
+                Serial.println("out of ping count");
+            }
             if (isServerConnected)
             {
                 if (isNewCardFound)
@@ -306,7 +324,7 @@ void loop() {
                     socketCmd += deviceID;
                     socketCmd += ",";
                     socketCmd += "\"cardID\":";
-                    socketCmd += deviceID;
+                    socketCmd += g_cardID;
                     socketCmd += "}]";
                     // send ping
                     Serial.println(socketCmd);
@@ -315,10 +333,10 @@ void loop() {
                 }
                 else
                 {
-                    if (curTime - prevSendPingTime >= SEND_PING_CMD)
+                    if (curTime - g_prevSendPingTime >= SEND_PING_CMD)
                     {
-                        prevSendPingTime = curTime;
-                        // pingSendCount++;
+                        g_prevSendPingTime = curTime;
+                        g_pingSendCount++;
                         // webSocket.sendTXT("42[\"messageType\",{\"greeting\":\"hello\"}]");
                         socketCmd += "42[\"wm_ping\",";
                         socketCmd += "{";
@@ -369,9 +387,9 @@ void ledUpdate(void)
 {
 
   switch(ledPos){
-    case 0: ledData = number[washTime / 100]; break;
-    case 1: ledData = number[(washTime / 10 ) % 10]; break;
-    //case 2: ledData = number[washTime % 10]; break;
+    case 0: ledData = number[g_washTime / 100]; break;
+    case 1: ledData = number[(g_washTime / 10 ) % 10]; break;
+    //case 2: ledData = number[g_washTime % 10]; break;
   }
 
   ledCtrlData = (1 << ledPos) | (ledCtrlData & 0xF8);
