@@ -352,6 +352,42 @@ void loop() {
             }
         }
     }
+
+    if (isStarted) // decrease time
+    {
+        if (washTime == 0) // wash finish
+        {
+            isStarted = false;
+            setRelayEnable(false);
+            if (isWifiConnected && isServerConnected)
+            {
+                socketCmd += "42[\"wm_stop\",";
+                socketCmd += "{";
+                socketCmd += "\"deviceID\":";
+                socketCmd += deviceID;
+                socketCmd += ",";
+                socketCmd += "\"cardID\":";
+                socketCmd += g_cardID;
+                socketCmd += "}]";
+                // send stop msg
+                Serial.println(socketCmd);
+                webSocket.sendTXT(socketCmd);
+                socketCmd = "";
+            }
+        }
+        if (curTime - prevMinuteTime >= ONE_MINUTE)
+        {
+            if (washTime)
+            {
+                washTime--;
+                prevMinuteTime = curTime;
+            }
+            if (washTime == 0)
+            {
+              //tagID= "A1F32F71F8B";
+            }
+        }
+    }
 }
 
 bool compareCardUID(byte *buffer, byte bufferSize)
