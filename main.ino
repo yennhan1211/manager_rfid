@@ -240,8 +240,13 @@ void loop() {
                 // Serial.print(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " ");
                 // Serial.print(mfrc522.uid.uidByte[i], HEX);
             }
-            if (tmpCardId != g_cardID)
+            if (tmpCardId != g_cardID) // new card found
             {
+                if (isStarted)
+                {
+                    isStarted = false;
+                    requestWashMachineStop = true;
+                }
                 g_cardID = tmpCardId;
                 isNewCardFound = true;
                 g_cardFoundCount = 0;
@@ -358,22 +363,7 @@ void loop() {
         if (washTime == 0) // wash finish
         {
             isStarted = false;
-            setRelayEnable(false);
-            if (isWifiConnected && isServerConnected)
-            {
-                socketCmd += "42[\"wm_stop\",";
-                socketCmd += "{";
-                socketCmd += "\"deviceID\":";
-                socketCmd += deviceID;
-                socketCmd += ",";
-                socketCmd += "\"cardID\":";
-                socketCmd += g_cardID;
-                socketCmd += "}]";
-                // send stop msg
-                Serial.println(socketCmd);
-                webSocket.sendTXT(socketCmd);
-                socketCmd = "";
-            }
+            requestWashMachineStop = true;
         }
         if (curTime - prevMinuteTime >= ONE_MINUTE)
         {
@@ -386,6 +376,27 @@ void loop() {
             {
               //tagID= "A1F32F71F8B";
             }
+        }
+    }
+
+    if (requestWashMachineStop)
+    {
+        requestWashMachineStop = false;
+        setRelayEnable(false);
+        if (isWifiConnected && isServerConnected)
+        {
+            socketCmd += "42[\"wm_stop\",";
+            socketCmd += "{";
+            socketCmd += "\"deviceID\":";
+            socketCmd += deviceID;
+            socketCmd += ",";
+            socketCmd += "\"cardID\":";
+            socketCmd += g_cardID;
+            socketCmd += "}]";
+            // send stop msg
+            Serial.println(socketCmd);
+            webSocket.sendTXT(socketCmd);
+            socketCmd = "";
         }
     }
 }
@@ -434,21 +445,15 @@ void ledUpdate(void)
 
   // push out data
   digitalWrite(LATCH_PIN, LOW);
-  shiftOut(DATA_PIN, CLK_PIN, ledCtrlData);
-  shiftOut(DATA_PIN, CLK_PIN, ledData);
+  shiftOut(ledCtrlData);
+  shiftOut(ledData);
   digitalWrite(LATCH_PIN, HIGH);
 }
 
-void shiftOut(int myDataPin, int myClockPin, byte myDataOut) {
-  // This shifts 8 bits out MSB first,
-  //on the rising edge of the clock,
-  //clock idles low
-
+void shiftOut(byte myDataOut) {
   int i=0;
   int pinState;
 
-  pinMode(myClockPin, OUTPUT);
-  pinMode(myDataPin, OUTPUT);
 
   digitalWrite(myDataPin, 0);
   digitalWrite(myClockPin, 0);
