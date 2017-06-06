@@ -39,11 +39,14 @@ GND     = GND
 #define UDP_PORT                6789
 #define TCP_PORT                8001
 
+#define NORMAL_MODE              0U
+#define CONFIG_MODE              1U
+
 //String tagID= "A1 32 71 8B";
 String tagID= "20 12 F1 19";
 
-const char *ssid;     // change according to your Network - cannot be longer than 32 characters!
-const char *pass; // change according to your Network
+String ssid;     // change according to your Network - cannot be longer than 32 characters!
+String pass; // change according to your Network
 
 char packetBuffer[255];          // buffer to hold incoming packet
 
@@ -56,6 +59,7 @@ bool isServerConnected = false;
 bool isGotIpServer = false;
 bool isNewCardFound = false;
 bool isSameCard = false;
+bool isEnteredConfigMode = false;
 bool state_role = false;
 
 volatile byte state_button = false;
@@ -70,6 +74,7 @@ uint32_t g_prevCardScanTime = 0;
 uint32_t g_prevMinuteTime = 0;
 uint32_t g_prevSendBroadcastCmdTime = 0;
 uint32_t g_prevSendPingTime = 0;
+uint32_t g_prevConnectedTime = 0;
 uint32_t g_operateTime = 0;
 uint32_t g_pingSendCount = 0;
 uint32_t g_washTime = 0;
@@ -111,6 +116,9 @@ void setup() {
     digitalWrite(CLK_PIN, LOW);
     digitalWrite(LATCH_PIN, LOW);
 
+    WiFi.mode(WIFI_AP_STA);
+    delay(100);
+
     if (!SPIFFS.begin()) {
         Serial.println("Failed to mount file system");
     }
@@ -144,15 +152,27 @@ void setup() {
             pass = json["pass"];
             deviceID = json["deviceID"];
 
-            Serial.println(String(ssid));
-            Serial.println(String(pass));
+            if (ssid == String("test") && pass == String("test"))
+            {
+                // start smart config
+                isEnteredConfigMode = true;
+                WiFi.beginSmartConfig();
+            }
+
+            Serial.println(ssid);
+            Serial.println(pass);
             Serial.println(deviceID);
         }
     }
 
-    WiFi.begin(ssid, pass);
+    if (!isEnteredConfigMode)
+    {
+        WiFi.begin(ssid, pass);
+    }
 
     udpClient.begin(UDP_PORT);
+
+    configFile.close();
 
     Serial.println(F("Ready!"));
 }
@@ -201,7 +221,34 @@ void loop() {
     uint32_t packetSize = 0;
     uint32_t tmpCardId = 0;
 
-    if (WiFi.status() == WL_CONNECTED && isWifiConnected == false)
+    if (WiFi.status() == WL_CONNECTED && isEnteredConfigMode == true)
+    {
+        WiFi.smartConfigDone();
+        isEnteredConfigMode = false;
+        // save new data to config file
+        File wf = SPIFFS.open("/config.json", "w");
+        if (!wf) {
+            Serial.println("Failed to open config file");
+        }
+        else
+        {
+            StaticJsonBuffer<200> jsonBuffer;
+            JsonObject& json = jsonBuffer.createObject();
+            json["ssid"] = WiFi.SSID();
+            json["pass"] = WiFi.psk();
+            json["deviceID"] = deviceID;
+
+            json.printTo(wf);
+
+            wf.flush();
+            wf.close();
+
+            SPIFFS.end();
+        }
+        // system reboot
+        ESP.restart()
+    }
+    else if (WiFi.status() == WL_CONNECTED && isWifiConnected == false)
     {
         if (!isWifiConnected)
         {
@@ -220,6 +267,18 @@ void loop() {
         }
         isWifiConnected = false;
         isGotIpServer = false;
+    }
+    else if (WiFi.status() != WL_CONNECTED && isWifiConnected == false)
+    {
+        if (!isEnteredConfigMode)
+        {
+            if (curTime - g_prevConnectedTime >= TIMEOUT_CONNECT_TO_ROUTER)
+            {
+                g_prevConnectedTime = curTime;
+                WiFi.disconnect();
+                WiFi.beginSmartConfig();
+            }
+        }
     }
 
     if (isWifiConnected && isGotIpServer)
