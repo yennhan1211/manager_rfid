@@ -18,23 +18,24 @@ GND     = GND
 3.3V    = 3.3V
 */
 
-#define BOARD_TYPE              1
+#define BOARD_TYPE                  1
 
-#define RST_PIN                 5  // RST-PIN für RC522 - RFID - SPI - Modul GPIO5
-#define SS_PIN                  16  // SDA-PIN für RC522 - RFID - SPI - Modul GPIO4
+#define RST_PIN                     5  // RST-PIN für RC522 - RFID - SPI - Modul GPIO5
+#define SS_PIN                      16  // SDA-PIN für RC522 - RFID - SPI - Modul GPIO4
 
-#define DATA_PIN                4
-#define CLK_PIN                 15
-#define LATCH_PIN               2
+#define DATA_PIN                    4
+#define CLK_PIN                     15
+#define LATCH_PIN                   2
 
-#define BTN_PIN                 0
+#define BTN_PIN                     0
 
-#define LED_UPDATE_INTERVAL     5 // 5 ms
-#define CARD_SCAN_INTERLVAL     100 // 0,5 s
-#define ONE_MINUTE              1200 //60000 // 60k ms
-#define WASH_TIME               35 // 35 min
-#define SEND_BROADCAST_CMD      1000
-#define SEND_PING_CMD           1000
+#define LED_UPDATE_INTERVAL         5 // 5 ms
+#define CARD_SCAN_INTERLVAL         100 // 0,5 s
+#define ONE_MINUTE                  1200 //60000 // 60k ms
+#define WASH_TIME                   35 // 35 min
+#define SEND_BROADCAST_CMD          1000
+#define SEND_PING_CMD               1000
+#define TIMEOUT_CONNECT_TO_ROUTER   600000
 
 #define UDP_PORT                6789
 #define TCP_PORT                8001
@@ -45,8 +46,8 @@ GND     = GND
 //String tagID= "A1 32 71 8B";
 String tagID= "20 12 F1 19";
 
-String ssid;     // change according to your Network - cannot be longer than 32 characters!
-String pass; // change according to your Network
+const char* ssid;     // change according to your Network - cannot be longer than 32 characters!
+const char* pass; // change according to your Network
 
 char packetBuffer[255];          // buffer to hold incoming packet
 
@@ -152,15 +153,15 @@ void setup() {
             pass = json["pass"];
             deviceID = json["deviceID"];
 
-            if (ssid == String("test") && pass == String("test"))
-            {
-                // start smart config
-                isEnteredConfigMode = true;
-                WiFi.beginSmartConfig();
-            }
+            // if (ssid == String("test") && pass == String("test"))
+            // {
+            //     // start smart config
+            //     isEnteredConfigMode = true;
+            //     WiFi.beginSmartConfig();
+            // }
 
-            Serial.println(ssid);
-            Serial.println(pass);
+            Serial.println(String(ssid));
+            Serial.println(String(pass));
             Serial.println(deviceID);
         }
     }
@@ -232,13 +233,13 @@ void loop() {
         }
         else
         {
-            StaticJsonBuffer<200> jsonBuffer;
-            JsonObject& json = jsonBuffer.createObject();
-            json["ssid"] = WiFi.SSID();
-            json["pass"] = WiFi.psk();
-            json["deviceID"] = deviceID;
+            // StaticJsonBuffer<200> jsonBuffer;
+            // JsonObject& json = jsonBuffer.createObject();
+            // json["ssid"] = WiFi.SSID();
+            // json["pass"] = WiFi.psk();
+            // json["deviceID"] = deviceID;
 
-            json.printTo(wf);
+            // json.printTo(wf);
 
             wf.flush();
             wf.close();
@@ -246,7 +247,7 @@ void loop() {
             SPIFFS.end();
         }
         // system reboot
-        ESP.restart()
+        ESP.restart();
     }
     else if (WiFi.status() == WL_CONNECTED && isWifiConnected == false)
     {
