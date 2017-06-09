@@ -8,6 +8,10 @@
 #include "FS.h"
 #include "MFRC522.h"
 
+extern "C" {
+#include "user_interface.h"
+}
+
 /* wiring the MFRC522 to ESP8266 (ESP-12)
 RST     = GPIO5
 SDA(SS) = GPIO4
@@ -39,6 +43,8 @@ GND     = GND
 #define UDP_PORT                6789
 #define TCP_PORT                8001
 
+os_timer_t myTimer;
+
 //String tagID= "A1 32 71 8B";
 String tagID= "20 12 F1 19";
 
@@ -47,8 +53,8 @@ const char *pass; // change according to your Network
 
 char packetBuffer[255];          // buffer to hold incoming packet
 
-//const uint8_t number[10] = {0x3F,0x06,0x5B,0x4F,0x66,0x6D,0x7D,0x07,0x7F,0x6F}; // katot chung
-const uint8_t number[10] = {0xC0,0xF9,0xA4,0xB0,0x99,0x92,0x82,0xF8,0x80,0x90}; // anot chung
+const uint8_t number[10] = {0x3F,0x06,0x5B,0x4F,0x66,0x6D,0x7D,0x07,0x7F,0x6F}; // katot chung
+// const uint8_t number[10] = {0xC0,0xF9,0xA4,0xB0,0x99,0x92,0x82,0xF8,0x80,0x90}; // anot chung
 
 bool isStarted = false;
 bool isWifiConnected = false;
@@ -57,6 +63,7 @@ bool isGotIpServer = false;
 bool isNewCardFound = false;
 bool isSameCard = false;
 bool state_role = false;
+bool requestWashMachineStop = false;
 
 volatile byte state_button = false;
 
@@ -75,6 +82,7 @@ uint32_t g_pingSendCount = 0;
 uint32_t g_washTime = 0;
 uint32_t deviceID = 0;
 uint32_t g_cardID = 0;
+
 
 uint8_t ledData = 0;
 uint8_t ledCtrlData = 0;
@@ -149,6 +157,13 @@ void setup() {
             Serial.println(deviceID);
         }
     }
+
+    timer0_isr_init();
+    timer0_attachInterrupt(ledUpdate);
+    timer0_write(ESP.getCycleCount()+40000);
+
+    // os_timer_setfn(&myTimer, ledUpdate, NULL);
+    // os_timer_arm(&myTimer, 5, true);
 
     WiFi.begin(ssid, pass);
 
@@ -237,8 +252,8 @@ void loop() {
             for (byte i = 0; i < mfrc522.uid.size; i++)
             {
                 tmpCardId |= (mfrc522.uid.uidByte[i] << (i * 8));
-                // Serial.print(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " ");
-                // Serial.print(mfrc522.uid.uidByte[i], HEX);
+                Serial.print(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " ");
+                Serial.print(mfrc522.uid.uidByte[i], HEX);
             }
             if (tmpCardId != g_cardID) // new card found
             {
@@ -360,19 +375,19 @@ void loop() {
 
     if (isStarted) // decrease time
     {
-        if (washTime == 0) // wash finish
+        if (g_washTime == 0) // wash finish
         {
             isStarted = false;
             requestWashMachineStop = true;
         }
-        if (curTime - prevMinuteTime >= ONE_MINUTE)
+        if (curTime - g_prevMinuteTime >= ONE_MINUTE)
         {
-            if (washTime)
+            if (g_washTime)
             {
-                washTime--;
-                prevMinuteTime = curTime;
+                g_washTime--;
+                g_prevMinuteTime = curTime;
             }
-            if (washTime == 0)
+            if (g_washTime == 0)
             {
               //tagID= "A1F32F71F8B";
             }
@@ -432,22 +447,23 @@ void setRelayEnable(bool enable)
 
 void ledUpdate(void)
 {
-
-  switch(ledPos){
-    case 0: ledData = number[g_washTime / 100]; break;
-    case 1: ledData = number[(g_washTime / 10 ) % 10]; break;
+    timer0_write(ESP.getCycleCount()+600000);
+    // Serial.println("in led update");
+    switch(ledPos){
+        case 0: ledData = number[g_washTime / 100]; break;
+        case 1: ledData = number[(g_washTime / 10 ) % 10]; break;
     //case 2: ledData = number[g_washTime % 10]; break;
-  }
+    }
 
-  ledCtrlData = (1 << ledPos) | (ledCtrlData & 0xF8);
+    ledCtrlData = (1 << ledPos) | (ledCtrlData & 0xF8);
 
-  if (++ledPos >= 3) ledPos = 0;
+    if (++ledPos >= 3) ledPos = 0;
 
-  // push out data
-  digitalWrite(LATCH_PIN, LOW);
-  shiftOut(ledCtrlData);
-  shiftOut(ledData);
-  digitalWrite(LATCH_PIN, HIGH);
+    // push out data
+    digitalWrite(LATCH_PIN, LOW);
+    shiftOut(ledCtrlData);
+    shiftOut(ledData);
+    digitalWrite(LATCH_PIN, HIGH);
 }
 
 void shiftOut(byte myDataOut) {
@@ -455,11 +471,11 @@ void shiftOut(byte myDataOut) {
   int pinState;
 
 
-  digitalWrite(myDataPin, 0);
-  digitalWrite(myClockPin, 0);
+  digitalWrite(DATA_PIN, 0);
+  digitalWrite(CLK_PIN, 0);
 
   for (i=7; i>=0; i--)  {
-    digitalWrite(myClockPin, 0);
+    digitalWrite(CLK_PIN, 0);
 
     if ( myDataOut & (1<<i) ) {
       pinState= 1;
@@ -469,13 +485,13 @@ void shiftOut(byte myDataOut) {
     }
 
     //Sets the pin to HIGH or LOW depending on pinState
-    digitalWrite(myDataPin, pinState);
+    digitalWrite(DATA_PIN, pinState);
     //register shifts bits on upstroke of clock pin
-    digitalWrite(myClockPin, 1);
+    digitalWrite(CLK_PIN, 1);
     //zero the data pin after shift to prevent bleed through
-    digitalWrite(myDataPin, 0);
+    digitalWrite(DATA_PIN, 0);
   }
 
   //stop shifting
-  digitalWrite(myClockPin, 0);
+  digitalWrite(CLK_PIN, 0);
 }
