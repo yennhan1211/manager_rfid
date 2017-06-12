@@ -37,8 +37,8 @@ GND     = GND
 #define SEND_PING_CMD               1000
 #define TIMEOUT_CONNECT_TO_ROUTER   600000
 
-#define UDP_PORT                6789
-#define TCP_PORT                8001
+#define UDP_PORT                6969
+#define TCP_PORT                9696
 
 #define NORMAL_MODE              0U
 #define CONFIG_MODE              1U
@@ -92,6 +92,7 @@ WiFiUDP udpClient;
 WebSocketsClient webSocket;
 IPAddress broadcastIp;
 IPAddress remoteIp;
+IPAddress localIP;
 
 String socketCmd = "";
 
@@ -271,15 +272,15 @@ void loop() {
     }
     else if (WiFi.status() != WL_CONNECTED && isWifiConnected == false)
     {
-        if (!isEnteredConfigMode)
-        {
-            if (curTime - g_prevConnectedTime >= TIMEOUT_CONNECT_TO_ROUTER)
-            {
-                g_prevConnectedTime = curTime;
-                WiFi.disconnect();
-                WiFi.beginSmartConfig();
-            }
-        }
+        // if (!isEnteredConfigMode)
+        // {
+        //     if (curTime - g_prevConnectedTime >= TIMEOUT_CONNECT_TO_ROUTER)
+        //     {
+        //         g_prevConnectedTime = curTime;
+        //         WiFi.disconnect();
+        //         WiFi.beginSmartConfig();
+        //     }
+        // }
     }
 
     if (isWifiConnected && isGotIpServer)
@@ -328,8 +329,17 @@ void loop() {
                 g_prevSendBroadcastCmdTime = curTime;
                 Serial.println("broadcast msg");
                 // send broadcast cmd
+                broadcastMsg += "{\"client\":\"";
+                broadcastMsg += localIP[0];
+                broadcastMsg += '.';
+                broadcastMsg += localIP[1];
+                broadcastMsg += '.';
+                broadcastMsg += localIP[2];
+                broadcastMsg += '.';
+                broadcastMsg += localIP[3];
+                broadcastMsg += "\"}";
                 udpClient.beginPacket(broadcastIp, UDP_PORT);
-                udpClient.write("{\"client\":\"hello server\"}");
+                udpClient.write(broadcastMsg.c_str());
                 udpClient.endPacket();
             }
             else
@@ -345,6 +355,7 @@ void loop() {
                     }
                     remoteIp = udpClient.remoteIP();
                     isGotIpServer = true;
+                    Serial.printf("%s\n", packetBuffer);
                     Serial.println(remoteIp);
                     // if got ip server
                     {
@@ -378,7 +389,7 @@ void loop() {
                 {
                     isNewCardFound = false;
                     //send card uid
-                    socketCmd += "42[\"wm_ask_for_run\",";
+                    socketCmd += "42[\"mng_request_run\",";
                     socketCmd += "{";
                     socketCmd += "\"deviceID\":";
                     socketCmd += deviceID;
@@ -396,7 +407,7 @@ void loop() {
                     if (curTime - g_prevSendPingTime >= SEND_PING_CMD)
                     {
                         g_prevSendPingTime = curTime;
-                        g_pingSendCount++;
+                        // g_pingSendCount++;
                         // webSocket.sendTXT("42[\"messageType\",{\"greeting\":\"hello\"}]");
                         socketCmd += "42[\"wm_ping\",";
                         socketCmd += "{";
