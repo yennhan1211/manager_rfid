@@ -40,8 +40,8 @@ GND     = GND
 #define SEND_BROADCAST_CMD      1000
 #define SEND_PING_CMD           1000
 
-#define UDP_PORT                6789
-#define TCP_PORT                8001
+#define UDP_PORT                6969
+#define TCP_PORT                9696
 
 os_timer_t myTimer;
 
@@ -63,6 +63,7 @@ bool isGotIpServer = false;
 bool isNewCardFound = false;
 bool isSameCard = false;
 bool state_role = false;
+bool isRegisted = false;
 bool requestWashMachineStop = false;
 
 volatile byte state_button = false;
@@ -94,11 +95,13 @@ WiFiUDP udpClient;
 WebSocketsClient webSocket;
 IPAddress broadcastIp;
 IPAddress remoteIp;
+IPAddress localIP;
 
 String socketCmd = "";
 
 void setup() {
     size_t size;
+    StaticJsonBuffer<200> jsonBuffer;
 
     Serial.begin(9600);    // Initialize serial communications
     delay(100);
@@ -107,7 +110,7 @@ void setup() {
 
     SPI.begin();           // Init SPI bus
     mfrc522.PCD_Init();    // Init MFRC522
-
+    mfrc522.PCD_SetAntennaGain(mfrc522.RxGain_max);
     // Init pin
     pinMode(DATA_PIN, OUTPUT);
     pinMode(CLK_PIN, OUTPUT);
@@ -141,7 +144,6 @@ void setup() {
 
             configFile.readBytes(buf.get(), size);
 
-            StaticJsonBuffer<200> jsonBuffer;
             JsonObject& json = jsonBuffer.parseObject(buf.get());
 
             if (!json.success()) {
@@ -158,16 +160,13 @@ void setup() {
         }
     }
 
-    timer0_isr_init();
-    timer0_attachInterrupt(ledUpdate);
-    timer0_write(ESP.getCycleCount()+40000);
-
-    // os_timer_setfn(&myTimer, ledUpdate, NULL);
-    // os_timer_arm(&myTimer, 5, true);
-
     WiFi.begin(ssid, pass);
 
     udpClient.begin(UDP_PORT);
+
+    timer0_isr_init();
+    timer0_attachInterrupt(ledUpdate);
+    timer0_write(ESP.getCycleCount()+60000);
 
     Serial.println(F("Ready!"));
 }
@@ -189,6 +188,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
                 Serial.printf("[WSc] Disconnected!\n");
                 isServerConnected = false;
                 isGotIpServer = false;
+                isRegisted = false;
                 webSocket.disconnect();
             }
             break;
@@ -201,8 +201,10 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
             break;
         case WStype_TEXT:
             {
-                g_pingSendCount = 0;
-                Serial.printf("[WSc] get text: %s\n", payload);
+                String resData((const char*)payload);
+
+                Serial.println(resData);
+                // Serial.printf("[WSc] get text: %s\n", payload);
             }
             break;
         case WStype_BIN:
@@ -221,6 +223,7 @@ void loop() {
         if (!isWifiConnected)
         {
             broadcastIp = ~WiFi.subnetMask() | WiFi.gatewayIP();
+            localIP = WiFi.localIP();
             isWifiConnected = true;
         }
         Serial.println("Connected");
@@ -235,6 +238,7 @@ void loop() {
         }
         isWifiConnected = false;
         isGotIpServer = false;
+        isRegisted = false;
     }
 
     if (isWifiConnected && isGotIpServer)
@@ -249,6 +253,10 @@ void loop() {
         if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial())
         {
             tmpCardId = 0;
+            static int test = 1;
+            test = test ^ 1;
+            setRelayEnable((bool)test);
+            isNewCardFound = true;
             for (byte i = 0; i < mfrc522.uid.size; i++)
             {
                 tmpCardId |= (mfrc522.uid.uidByte[i] << (i * 8));
@@ -285,11 +293,21 @@ void loop() {
         {
             if (curTime - g_prevSendBroadcastCmdTime >= SEND_BROADCAST_CMD)
             {
+                String broadcastMsg;
                 g_prevSendBroadcastCmdTime = curTime;
                 Serial.println("broadcast msg");
                 // send broadcast cmd
+                broadcastMsg += "{\"client\":\"";
+                broadcastMsg += localIP[0];
+                broadcastMsg += '.';
+                broadcastMsg += localIP[1];
+                broadcastMsg += '.';
+                broadcastMsg += localIP[2];
+                broadcastMsg += '.';
+                broadcastMsg += localIP[3];
+                broadcastMsg += "\"}";
                 udpClient.beginPacket(broadcastIp, UDP_PORT);
-                udpClient.write("{\"client\":\"hello server\"}");
+                udpClient.write(broadcastMsg.c_str());
                 udpClient.endPacket();
             }
             else
@@ -334,6 +352,22 @@ void loop() {
             }
             if (isServerConnected)
             {
+                if (!isRegisted)
+                {
+                    isRegisted = true;
+                    //send reg cmd
+                    socketCmd += "42[\"wm_register\",";
+                    socketCmd += "{";
+                    socketCmd += "\"deviceID\":";
+                    socketCmd += deviceID;
+                    socketCmd += ",";
+                    socketCmd += "\"operate_state\":";
+                    socketCmd += (isStarted ? 2 : 0);
+                    socketCmd += "}]";
+                    Serial.println(socketCmd);
+                    webSocket.sendTXT(socketCmd);
+                    socketCmd = "";
+                }
                 if (isNewCardFound)
                 {
                     isNewCardFound = false;
@@ -356,7 +390,7 @@ void loop() {
                     if (curTime - g_prevSendPingTime >= SEND_PING_CMD)
                     {
                         g_prevSendPingTime = curTime;
-                        g_pingSendCount++;
+                        // g_pingSendCount++;
                         // webSocket.sendTXT("42[\"messageType\",{\"greeting\":\"hello\"}]");
                         socketCmd += "42[\"wm_ping\",";
                         socketCmd += "{";
@@ -437,11 +471,11 @@ void setRelayEnable(bool enable)
 {
   if (enable)
   {
-    ledCtrlData = (ledCtrlData & 0x07) | (0x03 << 3);
+    ledCtrlData = ledCtrlData & (~(0x03 << 3));
   }
   else
   {
-    ledCtrlData = ledCtrlData & (~(0x03 << 3));
+    ledCtrlData = (ledCtrlData & 0x07) | (0x03 << 3);
   }
 }
 
@@ -450,9 +484,9 @@ void ledUpdate(void)
     timer0_write(ESP.getCycleCount()+600000);
     // Serial.println("in led update");
     switch(ledPos){
-        case 0: ledData = number[g_washTime / 100]; break;
-        case 1: ledData = number[(g_washTime / 10 ) % 10]; break;
-    //case 2: ledData = number[g_washTime % 10]; break;
+        case 0: ledData = number[2]; break;
+        case 1: ledData = number[2]; break;
+        case 2: ledData = number[2]; break;
     }
 
     ledCtrlData = (1 << ledPos) | (ledCtrlData & 0xF8);
