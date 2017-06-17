@@ -56,6 +56,10 @@ char packetBuffer[255];          // buffer to hold incoming packet
 const uint8_t number[10] = {0x3F,0x06,0x5B,0x4F,0x66,0x6D,0x7D,0x07,0x7F,0x6F}; // katot chung
 // const uint8_t number[10] = {0xC0,0xF9,0xA4,0xB0,0x99,0x92,0x82,0xF8,0x80,0x90}; // anot chung
 
+uint8_t g_led1 = 0;
+uint8_t g_led2 = 0;
+uint8_t g_led3 = 0;
+
 bool isStarted = false;
 bool isWifiConnected = false;
 bool isServerConnected = false;
@@ -65,6 +69,8 @@ bool isSameCard = false;
 bool state_role = false;
 bool isRegisted = false;
 bool requestWashMachineStop = false;
+bool isRequested = false;
+bool hasCardFront = false;
 
 volatile byte state_button = false;
 
@@ -75,6 +81,7 @@ uint8_t g_cardFoundCount  = 0;
 
 uint32_t g_prevLedUpdateTime = 0;
 uint32_t g_prevCardScanTime = 0;
+uint32_t g_prevHasCard = 0;
 uint32_t g_prevMinuteTime = 0;
 uint32_t g_prevSendBroadcastCmdTime = 0;
 uint32_t g_prevSendPingTime = 0;
@@ -83,6 +90,7 @@ uint32_t g_pingSendCount = 0;
 uint32_t g_washTime = 0;
 uint32_t deviceID = 0;
 uint32_t g_cardID = 0;
+uint32_t g_RunningCardID = 0;
 
 
 uint8_t ledData = 0;
@@ -168,6 +176,8 @@ void setup() {
     timer0_attachInterrupt(ledUpdate);
     timer0_write(ESP.getCycleCount()+60000);
 
+    delay(5000);
+
     Serial.println(F("Ready!"));
 }
 
@@ -189,6 +199,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
                 isServerConnected = false;
                 isGotIpServer = false;
                 isRegisted = false;
+                udpClient.begin(UDP_PORT);
                 webSocket.disconnect();
             }
             break;
@@ -201,10 +212,32 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
             break;
         case WStype_TEXT:
             {
-                String resData((const char*)payload);
-
-                Serial.println(resData);
-                // Serial.printf("[WSc] get text: %s\n", payload);
+                if (length > 2)
+                {
+                    // 42["response","{\"code\":0}"]
+                    if (payload[0] == '4' && payload[1] == '2')
+                    {
+                        String resData((const char*)payload);
+                        Serial.println(resData);
+                        int idx = resData.indexOf("code");
+                        if (idx != -1)
+                        {
+                            int idx1 = resData.indexOf(':');
+                            if (idx1 != -1)
+                            {
+                                int responseCode = payload[idx1 + 1] - 48;
+                                if (responseCode == 2 && isRequested)
+                                {
+                                    isRequested = false;
+                                    isStarted = true;
+                                    g_washTime = WASH_TIME;
+                                    setRelayEnable(true);
+                                    Serial.println("exec");
+                                }
+                            }
+                        }
+                    }
+                }
             }
             break;
         case WStype_BIN:
@@ -253,15 +286,12 @@ void loop() {
         if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial())
         {
             tmpCardId = 0;
-            static int test = 1;
-            test = test ^ 1;
-            setRelayEnable((bool)test);
-            isNewCardFound = true;
+            g_cardNotFoundCount = 0;
             for (byte i = 0; i < mfrc522.uid.size; i++)
             {
                 tmpCardId |= (mfrc522.uid.uidByte[i] << (i * 8));
-                Serial.print(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " ");
-                Serial.print(mfrc522.uid.uidByte[i], HEX);
+                // Serial.print(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " ");
+                // Serial.print(mfrc522.uid.uidByte[i], HEX);
             }
             if (tmpCardId != g_cardID) // new card found
             {
@@ -272,19 +302,25 @@ void loop() {
                 }
                 g_cardID = tmpCardId;
                 isNewCardFound = true;
-                g_cardFoundCount = 0;
             }
 
             // Serial.println();
         }
+        else
+        {
+            if (g_cardID != 0)
+            {
+                if (g_cardNotFoundCount++ >= (20)) // 5s
+                {
+                    g_cardNotFoundCount = 0;
+                    g_cardID = 0;
+                }
+            }
+        }
     }
     else
     {
-        if (g_cardFoundCount++ >= (CARD_SCAN_INTERLVAL * 50)) // 5s
-        {
-            g_cardFoundCount = 0;
-            g_cardID = 0;
-        }
+
     }
 
     if (isWifiConnected)
@@ -334,6 +370,8 @@ void loop() {
                         ipAddr += remoteIp[2];
                         ipAddr += '.';
                         ipAddr += remoteIp[3];
+                        udpClient.flush();
+                        udpClient.stopAll();
                         webSocket.beginSocketIO(ipAddr, TCP_PORT);
                         webSocket.onEvent(webSocketEvent);
                     }
@@ -383,6 +421,7 @@ void loop() {
                     // send ping
                     Serial.println(socketCmd);
                     webSocket.sendTXT(socketCmd);
+                    isRequested = true;
                     socketCmd = "";
                 }
                 else
@@ -420,9 +459,15 @@ void loop() {
             {
                 g_washTime--;
                 g_prevMinuteTime = curTime;
+                g_led1 = (uint8_t)(g_washTime / 100);
+                g_led2 = (uint8_t)((g_washTime / 10) % 10);
+                g_led3 = (uint8_t)(g_washTime % 10);
             }
             if (g_washTime == 0)
             {
+                g_led1 = 0;
+                g_led2 = 0;
+                g_led3 = 0;
               //tagID= "A1F32F71F8B";
             }
         }
@@ -470,12 +515,12 @@ bool compareCardUID(byte *buffer, byte bufferSize)
 void setRelayEnable(bool enable)
 {
   if (enable)
-  {
+  { // l l l r r p p p
     ledCtrlData = ledCtrlData & (~(0x03 << 3));
   }
   else
   {
-    ledCtrlData = (ledCtrlData & 0x07) | (0x03 << 3);
+    ledCtrlData = ledCtrlData | (0x03 << 3);
   }
 }
 
@@ -484,12 +529,12 @@ void ledUpdate(void)
     timer0_write(ESP.getCycleCount()+600000);
     // Serial.println("in led update");
     switch(ledPos){
-        case 0: ledData = number[2]; break;
-        case 1: ledData = number[2]; break;
-        case 2: ledData = number[2]; break;
+        case 0: ledData = number[g_led1]; break;
+        case 1: ledData = number[g_led2]; break;
+        case 2: ledData = number[g_led3]; break;
     }
 
-    ledCtrlData = (1 << ledPos) | (ledCtrlData & 0xF8);
+    ledCtrlData = ~(1 << ledPos) | (ledCtrlData & 0xF8);
 
     if (++ledPos >= 3) ledPos = 0;
 
