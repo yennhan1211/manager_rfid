@@ -35,13 +35,17 @@ GND     = GND
 
 #define LED_UPDATE_INTERVAL     5 // 5 ms
 #define CARD_SCAN_INTERLVAL     100 // 0,5 s
-#define ONE_MINUTE              1200 //60000 // 60k ms
+#define ONE_MINUTE              60000 //60000 // 60k ms
 #define WASH_TIME               35 // 35 min
 #define SEND_BROADCAST_CMD      1000
 #define SEND_PING_CMD           1000
 
 #define UDP_PORT                6969
 #define TCP_PORT                9696
+
+#define WIFI_LED                0
+#define SEVER_LED               1
+#define RUNNING_LED             2
 
 os_timer_t myTimer;
 
@@ -71,6 +75,7 @@ bool isRegisted = false;
 bool requestWashMachineStop = false;
 bool isRequested = false;
 bool hasCardFront = false;
+bool isEnteredConfig = false;
 
 volatile byte state_button = false;
 
@@ -162,21 +167,41 @@ void setup() {
             pass = json["pass"];
             deviceID = json["deviceID"];
 
+            if (String(ssid) == "test@nopass" && String(pass) == "nopass")
+            {
+                // start smart config
+                Serial.println("Enter config mode");
+                isEnteredConfig = true;
+                WiFi.mode(WIFI_AP_STA);
+                delay(500);
+                WiFi.beginSmartConfig();
+            }
+
             Serial.println(String(ssid));
             Serial.println(String(pass));
             Serial.println(deviceID);
         }
     }
 
-    WiFi.begin(ssid, pass);
+    if (!isEnteredConfig)
+    {
+        WiFi.begin(ssid, pass);
+        udpClient.begin(UDP_PORT);
+    }
 
-    udpClient.begin(UDP_PORT);
+    // close file
+    configFile.close();
+
+    setLedEnable(RUNNING_LED, false);
+    setLedEnable(WIFI_LED, false);
+    setLedEnable(SEVER_LED, false);
+    setRelayEnable(false);
+
+    delay(5000);
 
     timer0_isr_init();
     timer0_attachInterrupt(ledUpdate);
     timer0_write(ESP.getCycleCount()+60000);
-
-    delay(5000);
 
     Serial.println(F("Ready!"));
 }
@@ -197,6 +222,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
             {
                 Serial.printf("[WSc] Disconnected!\n");
                 isServerConnected = false;
+                setLedEnable(SEVER_LED, false);
                 isGotIpServer = false;
                 isRegisted = false;
                 udpClient.begin(UDP_PORT);
@@ -206,6 +232,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
         case WStype_CONNECTED:
             {
                 Serial.printf("[WSc] Connected to url: %s\n",  payload);
+                setLedEnable(SEVER_LED, true);
                 isServerConnected = true;
                 webSocket.sendTXT("5");
             }
@@ -231,6 +258,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
                                     isRequested = false;
                                     isStarted = true;
                                     g_washTime = WASH_TIME;
+                                    setLedEnable(RUNNING_LED, true);
                                     setRelayEnable(true);
                                     Serial.println("exec");
                                 }
@@ -253,17 +281,49 @@ void loop() {
 
     if (WiFi.status() == WL_CONNECTED && isWifiConnected == false)
     {
+        if (isEnteredConfig)
+        {
+            WiFi.smartConfigDone();
+            isEnteredConfig = false;
+            // save new data to config file
+            File wf = SPIFFS.open("/config.json", "w");
+            if (!wf) {
+                Serial.println("Failed to open config file to write");
+            }
+            else
+            {
+                StaticJsonBuffer<200> jsonBuffer;
+                JsonObject& json = jsonBuffer.createObject();
+                json["ssid"] = WiFi.SSID();
+                json["pass"] = WiFi.psk();
+                json["deviceID"] = deviceID;
+
+                Serial.println(String((const char*)json["ssid"]));
+                Serial.println(String((const char*)json["pass"]));
+
+                json.printTo(wf);
+
+                wf.flush();
+                wf.close();
+
+                SPIFFS.end();
+            }
+            // system reboot
+            ESP.restart();
+        }
         if (!isWifiConnected)
         {
             broadcastIp = ~WiFi.subnetMask() | WiFi.gatewayIP();
             localIP = WiFi.localIP();
             isWifiConnected = true;
         }
+        setLedEnable(WIFI_LED, true);
         Serial.println("Connected");
     }
     else if (WiFi.status() != WL_CONNECTED && isWifiConnected == true)
     {
         Serial.println("Disconnected");
+        setLedEnable(WIFI_LED, false);
         if (isServerConnected)
         {
             // disconnect
@@ -279,6 +339,7 @@ void loop() {
         webSocket.loop();
     }
 
+    // 100ms loop
     if (curTime - g_prevCardScanTime >= CARD_SCAN_INTERLVAL) // every 0.1s
     {
         g_prevCardScanTime = curTime;
@@ -303,7 +364,6 @@ void loop() {
                 g_cardID = tmpCardId;
                 isNewCardFound = true;
             }
-
             // Serial.println();
         }
         else
@@ -312,6 +372,11 @@ void loop() {
             {
                 if (g_cardNotFoundCount++ >= (20)) // 5s
                 {
+                    if (isStarted)
+                    {
+                        isStarted = false;
+                        requestWashMachineStop = true;
+                    }
                     g_cardNotFoundCount = 0;
                     g_cardID = 0;
                 }
@@ -439,6 +504,7 @@ void loop() {
                         // send ping
                         // Serial.println(socketCmd);
                         webSocket.sendTXT(socketCmd);
+                        // Serial.println(ledCtrlData);
                         socketCmd = "";
                     }
                 }
@@ -477,6 +543,7 @@ void loop() {
     {
         requestWashMachineStop = false;
         setRelayEnable(false);
+        setLedEnable(RUNNING_LED, false);
         if (isWifiConnected && isServerConnected)
         {
             socketCmd += "42[\"wm_stop\",";
@@ -515,13 +582,35 @@ bool compareCardUID(byte *buffer, byte bufferSize)
 void setRelayEnable(bool enable)
 {
   if (enable)
-  { // l l l r r p p p
-    ledCtrlData = ledCtrlData & (~(0x03 << 3));
+  { // l l l r b p p p
+    ledCtrlData = ledCtrlData & (~(1 << 3));
   }
   else
   {
-    ledCtrlData = ledCtrlData | (0x03 << 3);
+    ledCtrlData = ledCtrlData | (1 << 3);
   }
+}
+
+void setBuzzerOn(uint8_t period)
+{
+
+}
+
+// pos = 0 1 2
+void setLedEnable(uint8_t pos, bool enable) // need to check pos (lllrrddd)
+{
+    if (pos > 2)
+    {
+        return;
+    }
+    if (enable)
+    {
+        ledCtrlData = ledCtrlData & (~(1 << (pos + 5)));
+    }
+    else
+    {
+        ledCtrlData = (ledCtrlData & (~(1 << (pos + 5)))) | (1 << (pos + 5));
+    }
 }
 
 void ledUpdate(void)
@@ -534,7 +623,9 @@ void ledUpdate(void)
         case 2: ledData = number[g_led3]; break;
     }
 
-    ledCtrlData = ~(1 << ledPos) | (ledCtrlData & 0xF8);
+    // l l l r r p p p
+
+    ledCtrlData = (~(1 << ledPos) & 0x07) | (ledCtrlData & 0xF8);
 
     if (++ledPos >= 3) ledPos = 0;
 
