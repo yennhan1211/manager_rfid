@@ -7,6 +7,10 @@
 #include <ArduinoJson.h>
 #include "FS.h"
 #include "MFRC522.h"
+//needed for library for smartconfig
+#include <DNSServer.h>
+#include <ESP8266WebServer.h>
+#include <WiFiManager.h>         //https://github.com/tzapu/WiFiManager
 
 extern "C" {
 #include "user_interface.h"
@@ -34,11 +38,11 @@ GND     = GND
 #define BTN_PIN                 0
 
 #define LED_UPDATE_INTERVAL     5 // 5 ms
-#define CARD_SCAN_INTERLVAL     100 // 0,5 s
+#define CARD_SCAN_INTERLVAL     200 // 0,5 s
 #define ONE_MINUTE              60000 //60000 // 60k ms
-#define WASH_TIME               35 // 35 min
+#define WASH_TIME               40 // 40 min
 #define SEND_BROADCAST_CMD      1000
-#define SEND_PING_CMD           1000
+#define SEND_PING_CMD           2000
 
 #define UDP_PORT                6969
 #define TCP_PORT                9696
@@ -46,6 +50,14 @@ GND     = GND
 #define WIFI_LED                0
 #define SEVER_LED               1
 #define RUNNING_LED             2
+
+#define DEBUG                   1
+
+#ifdef DEBUG
+ #define TRACE 
+#else
+ #define TRACE for(;0;)
+#endif /* DEBUG */
 
 os_timer_t myTimer;
 
@@ -73,7 +85,7 @@ bool isSameCard = false;
 bool state_role = false;
 bool isRegisted = false;
 bool requestWashMachineStop = false;
-bool isRequested = false;
+bool isRequested = true;
 bool hasCardFront = false;
 bool isEnteredConfig = false;
 
@@ -93,7 +105,7 @@ uint32_t g_prevSendPingTime = 0;
 uint32_t g_operateTime = 0;
 uint32_t g_pingSendCount = 0;
 uint32_t g_washTime = 0;
-uint32_t deviceID = 0;
+//uint32_t deviceID = 0;
 uint32_t g_cardID = 0;
 uint32_t g_RunningCardID = 0;
 
@@ -111,99 +123,82 @@ IPAddress remoteIp;
 IPAddress localIP;
 
 String socketCmd = "";
+String ESPID = String(ESP.getChipId());
+void setup() {  
+    Serial.begin(115200);    // Initialize serial communications
+    //ESP.wdtDisable();
+    /* WiFiManager */
+    /* Local intialization. Once its business is done, there is no need to keep it around */
+    //ESP.wdtDisable();
+    //
+    WiFiManager wifiManager;
 
-void setup() {
-    size_t size;
-    StaticJsonBuffer<200> jsonBuffer;
-
-    Serial.begin(9600);    // Initialize serial communications
+    /* 
+    fetches ssid and pass from eeprom and tries to connect if it does not connect it starts an access point with the specified name here "AutoConnectAP" 
+    and goes into a blocking loop awaiting configuration wifiManager.autoConnect("AutoConnectAP", "password"); or use this for auto generated name ESP + ChipID 
+    */
+    
+    /* 
+    - when your ESP starts up, it sets it up in Station mode and tries to connect to a previously saved Access Point
+    - if this is unsuccessful (or no previous network saved) it moves the ESP into Access Point mode and spins up a DNS and WebServer (default ip 192.168.4.1)
+    - using any wifi enabled device with a browser (computer, phone, tablet) connect to the newly created Access Point
+    - because of the Captive Portal and the DNS server you will either get a 'Join to network' type of popup or get any domain you try to access redirected to the configuration portal
+    choose one of the access points scanned, enter password, click save
+    - ESP will try to connect. If successful, it relinquishes control back to your app. If not, reconnect to AP and reconfigure.
+    */
+    wifiManager.autoConnect();
+    
+    
+    //ESP.wdtEnable(150000);
     delay(100);
 
-    Serial.println("\r\nInitialize....");
-
-    SPI.begin();           // Init SPI bus
-    mfrc522.PCD_Init();    // Init MFRC522
-    mfrc522.PCD_SetAntennaGain(mfrc522.RxGain_max);
+    
+    TRACE Serial.println("\r\nInitialize....");
+    delay(5000);
+    
     // Init pin
     pinMode(DATA_PIN, OUTPUT);
     pinMode(CLK_PIN, OUTPUT);
     pinMode(LATCH_PIN, OUTPUT);
     pinMode(BTN_PIN, INPUT_PULLUP);
+    
+    SPI.begin();           // Init SPI bus
+    mfrc522.PCD_Init();    // Init MFRC522
+    mfrc522.PCD_SetAntennaGain(mfrc522.RxGain_max);
+
     //attachInterrupt(digitalPinToInterrupt(BTN_PIN), btnHandler, FALLING );
 
     digitalWrite(DATA_PIN, LOW);
     digitalWrite(CLK_PIN, LOW);
     digitalWrite(LATCH_PIN, LOW);
+    
+    delay(100);
+    //timer0_detachInterrupt();
+    udpClient.flush();
+    udpClient.stopAll();
+                        
+    udpClient.begin(UDP_PORT);
 
-    if (!SPIFFS.begin()) {
-        Serial.println("Failed to mount file system");
-    }
-
-    // load config info
-    File configFile = SPIFFS.open("/config.json", "r");
-    if (!configFile) {
-        Serial.println("Failed to open config file");
-    }
-    else
-    {
-        size = configFile.size();
-        if (size > 1024) {
-            Serial.println("Config file size is too large");
-        }
-        else
-        {
-            // Allocate a buffer to store contents of the file.
-            std::unique_ptr<char[]> buf(new char[size]);
-
-            configFile.readBytes(buf.get(), size);
-
-            JsonObject& json = jsonBuffer.parseObject(buf.get());
-
-            if (!json.success()) {
-                Serial.println("Failed to parse config file");
-            }
-
-            ssid = json["ssid"];
-            pass = json["pass"];
-            deviceID = json["deviceID"];
-
-            if (String(ssid) == "test@nopass" && String(pass) == "nopass")
-            {
-                // start smart config
-                Serial.println("Enter config mode");
-                isEnteredConfig = true;
-                WiFi.mode(WIFI_AP_STA);
-                delay(500);
-                WiFi.beginSmartConfig();
-            }
-
-            Serial.println(String(ssid));
-            Serial.println(String(pass));
-            Serial.println(deviceID);
-        }
-    }
-
-    if (!isEnteredConfig)
-    {
-        WiFi.begin(ssid, pass);
-        udpClient.begin(UDP_PORT);
-    }
-
-    // close file
-    configFile.close();
-
+    TRACE Serial.println(F("UDP Ready!"));
+    
     setLedEnable(RUNNING_LED, false);
     setLedEnable(WIFI_LED, false);
     setLedEnable(SEVER_LED, false);
     setRelayEnable(false);
-
+    
     delay(5000);
+    //timer0_isr_init();
+    //timer0_attachInterrupt(ledUpdate);
+    //timer0_write(ESP.getCycleCount()+6000000);
+    
+    //timer1_disable();
+    //timer1_isr_init();
+    //timer1_attachInterrupt(ledUpdate);
+    //timer1_enable(TIM_DIV1, TIM_EDGE, 1);
+    //timer1_enable(TIM_DIV1, TIM_EDGE, TIM_LOOP);
+    //timer1_write(ESP.getCycleCount()+600000);
 
-    timer0_isr_init();
-    timer0_attachInterrupt(ledUpdate);
-    timer0_write(ESP.getCycleCount()+60000);
-
-    Serial.println(F("Ready!"));
+    TRACE Serial.println(F("LED Ready!"));
 }
 
 void btnHandler(void)
@@ -220,51 +215,73 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
     switch(type) {
         case WStype_DISCONNECTED:
             {
-                Serial.printf("[WSc] Disconnected!\n");
+                //timer0_detachInterrupt();
+                TRACE Serial.printf("[WSc] Disconnected!\n");
                 isServerConnected = false;
                 setLedEnable(SEVER_LED, false);
                 isGotIpServer = false;
                 isRegisted = false;
-                udpClient.begin(UDP_PORT);
                 webSocket.disconnect();
+                udpClient.begin(UDP_PORT);
+                //timer0_attachInterrupt(ledUpdate);                
             }
             break;
         case WStype_CONNECTED:
             {
-                Serial.printf("[WSc] Connected to url: %s\n",  payload);
+                //timer0_detachInterrupt();
+                TRACE Serial.printf("[WSc] Connected to url: %s\n",  payload);
                 setLedEnable(SEVER_LED, true);
                 isServerConnected = true;
+                udpClient.flush();
+                udpClient.stopAll();
                 webSocket.sendTXT("5");
+                //timer0_attachInterrupt(ledUpdate);
             }
             break;
         case WStype_TEXT:
             {
                 if (length > 2)
                 {
+                    //timer0_detachInterrupt();
                     // 42["response","{\"code\":0}"]
                     if (payload[0] == '4' && payload[1] == '2')
                     {
                         String resData((const char*)payload);
-                        Serial.println(resData);
-                        int idx = resData.indexOf("code");
-                        if (idx != -1)
+                        TRACE Serial.println(resData);
+                        
+                        String temp((char*)payload);
+                        /* Get Json field in string  */
+                        /* Message request_type : "42["response",{"request_type":"wm_ask_for_run","code":2,"duration":35}]" */
+                        
+                        temp = temp.substring(temp.indexOf('{'), temp.indexOf('}')+1);
+                        TRACE Serial.println(temp);
+                        StaticJsonBuffer<200> jsonBuffer;
+                        JsonObject& ipmessage = jsonBuffer.parseObject(temp);
+                        if (!ipmessage.success()) {
+                        TRACE Serial.println("parseObject() failed");
+                        }
+                        
+                        else
                         {
-                            int idx1 = resData.indexOf(':');
-                            if (idx1 != -1)
+                        const char* request_code = ipmessage["code"];
+                        String tem_request_code((char*)request_code);
+                        if(tem_request_code=="2" && isRequested)
                             {
-                                int responseCode = payload[idx1 + 1] - 48;
-                                if (responseCode == 2 && isRequested)
-                                {
-                                    isRequested = false;
-                                    isStarted = true;
-                                    g_washTime = WASH_TIME;
-                                    setLedEnable(RUNNING_LED, true);
-                                    setRelayEnable(true);
-                                    Serial.println("exec");
-                                }
+                                const char* duration = ipmessage["duration"];
+                                String tem_duration((char*)duration);
+                                //TRACE Serial.print("duration : ");
+                                //TRACE Serial.println(tem_duration);
+                                g_washTime = tem_duration.toInt();
+                                TRACE Serial.println("runing");
+                                setLedEnable(RUNNING_LED, true);
+                                digitUpdate(g_washTime);
+                                isRequested = false;
+                                isStarted = true ;                                  
+                                setRelayEnable(true);
                             }
                         }
                     }
+                    //timer0_attachInterrupt(ledUpdate);
                 }
             }
             break;
@@ -278,51 +295,17 @@ void loop() {
     uint32_t curTime = millis();
     uint32_t packetSize = 0;
     uint32_t tmpCardId = 0;
-
+    ledUpdate();
     if (WiFi.status() == WL_CONNECTED && isWifiConnected == false)
     {
-        if (isEnteredConfig)
-        {
-            WiFi.smartConfigDone();
-            isEnteredConfig = false;
-            // save new data to config file
-            File wf = SPIFFS.open("/config.json", "w");
-            if (!wf) {
-                Serial.println("Failed to open config file to write");
-            }
-            else
-            {
-                StaticJsonBuffer<200> jsonBuffer;
-                JsonObject& json = jsonBuffer.createObject();
-                json["ssid"] = WiFi.SSID();
-                json["pass"] = WiFi.psk();
-                json["deviceID"] = deviceID;
-
-                Serial.println(String((const char*)json["ssid"]));
-                Serial.println(String((const char*)json["pass"]));
-
-                json.printTo(wf);
-
-                wf.flush();
-                wf.close();
-
-                SPIFFS.end();
-            }
-            // system reboot
-            ESP.restart();
-        }
-        if (!isWifiConnected)
-        {
-            broadcastIp = ~WiFi.subnetMask() | WiFi.gatewayIP();
-            localIP = WiFi.localIP();
-            isWifiConnected = true;
-        }
+        broadcastIp = ~WiFi.subnetMask() | WiFi.gatewayIP();
+        isWifiConnected = true;
         setLedEnable(WIFI_LED, true);
-        Serial.println("Connected");
+        TRACE Serial.println("Connected");
     }
     else if (WiFi.status() != WL_CONNECTED && isWifiConnected == true)
     {
-        Serial.println("Disconnected");
+        TRACE Serial.println("Disconnected");
         setLedEnable(WIFI_LED, false);
         if (isServerConnected)
         {
@@ -336,7 +319,9 @@ void loop() {
 
     if (isWifiConnected && isGotIpServer)
     {
+        //timer0_detachInterrupt();
         webSocket.loop();
+        //timer0_attachInterrupt(ledUpdate);
     }
 
     // 100ms loop
@@ -351,8 +336,8 @@ void loop() {
             for (byte i = 0; i < mfrc522.uid.size; i++)
             {
                 tmpCardId |= (mfrc522.uid.uidByte[i] << (i * 8));
-                // Serial.print(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " ");
-                // Serial.print(mfrc522.uid.uidByte[i], HEX);
+                //TRACE Serial.print(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " ");
+                //TRACE Serial.print(mfrc522.uid.uidByte[i], HEX);
             }
             if (tmpCardId != g_cardID) // new card found
             {
@@ -360,11 +345,12 @@ void loop() {
                 {
                     isStarted = false;
                     requestWashMachineStop = true;
+                    digitUpdate(0);
                 }
                 g_cardID = tmpCardId;
                 isNewCardFound = true;
             }
-            // Serial.println();
+            //TRACE Serial.println();
         }
         else
         {
@@ -375,7 +361,9 @@ void loop() {
                     if (isStarted)
                     {
                         isStarted = false;
+                        isRequested = true;
                         requestWashMachineStop = true;
+                        digitUpdate(0);
                     }
                     g_cardNotFoundCount = 0;
                     g_cardID = 0;
@@ -388,16 +376,19 @@ void loop() {
 
     }
 
+    UDPbroadcast :
     if (isWifiConnected)
     {
         if (!isGotIpServer)
         {
             if (curTime - g_prevSendBroadcastCmdTime >= SEND_BROADCAST_CMD)
             {
-                String broadcastMsg;
+                //timer0_detachInterrupt();
                 g_prevSendBroadcastCmdTime = curTime;
-                Serial.println("broadcast msg");
-                // send broadcast cmd
+                TRACE Serial.println("broadcast msg");
+                String broadcastMsg;
+                localIP = WiFi.localIP();
+                /* send broadcast cmd */
                 broadcastMsg += "{\"client\":\"";
                 broadcastMsg += localIP[0];
                 broadcastMsg += '.';
@@ -410,36 +401,68 @@ void loop() {
                 udpClient.beginPacket(broadcastIp, UDP_PORT);
                 udpClient.write(broadcastMsg.c_str());
                 udpClient.endPacket();
+                //timer0_attachInterrupt(ledUpdate);
             }
             else
             {
                 packetSize = udpClient.parsePacket();
-
                 if (packetSize)
                 {
-                    // read the packet into packetBufffer
+                    //timer0_detachInterrupt();
+                    /* read the packet into packetBufffer */
                     int len = udpClient.read(packetBuffer, 255);
                     if (len > 0) {
                       packetBuffer[len] = 0;
+                    }              
+                    TRACE Serial.printf("%s\n", packetBuffer);
+                    
+                    String temp((char*)packetBuffer);
+                    /* Get Json field in string  */
+                    /* Message ip_server : "42[\"response\",{\"ip_server\":\"192.168.1.1\"}]" */
+                    /* Message reset_setting : "42[\"response\",{\"reset_setting\":\"true\"}]" */
+                    temp = temp.substring(temp.indexOf('{'), temp.indexOf('}')+1);
+                    StaticJsonBuffer<200> jsonBuffer;
+                    JsonObject& ipmessage = jsonBuffer.parseObject(temp);
+                    if (!ipmessage.success()) {
+                        TRACE Serial.println("parseObject() failed");
+                        goto UDPbroadcast;
                     }
-                    remoteIp = udpClient.remoteIP();
-                    isGotIpServer = true;
-                    Serial.println(remoteIp);
-                    // if got ip server
+                    else
                     {
-                        String ipAddr;
-                        ipAddr += remoteIp[0];
-                        ipAddr += '.';
-                        ipAddr += remoteIp[1];
-                        ipAddr += '.';
-                        ipAddr += remoteIp[2];
-                        ipAddr += '.';
-                        ipAddr += remoteIp[3];
+                    const char* reset_setting = ipmessage["reset_setting"];
+                    String tem_reset_setting((char*)reset_setting);
+                    if(tem_reset_setting=="true")
+                    {
+                        /* WiFiManager */
+                        /* Local intialization. Once its business is done, there is no need to keep it around */
+                        //timer0_detachInterrupt();
                         udpClient.flush();
                         udpClient.stopAll();
-                        webSocket.beginSocketIO(ipAddr, TCP_PORT);
-                        webSocket.onEvent(webSocketEvent);
+                        webSocket.disconnect();
+                        TRACE Serial.println("reset setting SSID and Password");  
+                        WiFiManager wifiManager;
+                        /* reset saved settings */
+                        
+                        wifiManager.resetSettings();
+                        WiFi.disconnect();
+                        wifiManager.autoConnect();
+                        udpClient.begin(UDP_PORT); 
+                        //timer0_attachInterrupt(ledUpdate);                        
                     }
+                    const char* ip_server = ipmessage["ip_server"];
+                    String tem_ip((char*)ip_server);
+                    /* check number of IP */
+                    if(tem_ip.length() > 8)
+                    {
+                        TRACE Serial.println(tem_ip);
+                        webSocket.beginSocketIO(tem_ip, TCP_PORT);
+                        webSocket.onEvent(webSocketEvent);
+                        isGotIpServer = true;
+                    }
+                    else goto UDPbroadcast;
+                    }
+                    //timer0_attachInterrupt(ledUpdate);
+
                 }
             }
         }
@@ -451,23 +474,26 @@ void loop() {
                 webSocket.disconnect();
                 isServerConnected = false;
                 isGotIpServer = false;
-                Serial.println("out of ping count");
+                TRACE Serial.println("out of ping count");
             }
             if (isServerConnected)
             {
+                //timer0_detachInterrupt(); 
                 if (!isRegisted)
                 {
+                    delay(5000);
                     isRegisted = true;
                     //send reg cmd
                     socketCmd += "42[\"wm_register\",";
                     socketCmd += "{";
-                    socketCmd += "\"deviceID\":";
-                    socketCmd += deviceID;
-                    socketCmd += ",";
+                    socketCmd += "\"deviceID\":\"";
+                    /* Get deviceID from ESP ID chip */
+                    socketCmd += ESPID;
+                    socketCmd += "\",";
                     socketCmd += "\"operate_state\":";
                     socketCmd += (isStarted ? 2 : 0);
                     socketCmd += "}]";
-                    Serial.println(socketCmd);
+                    TRACE Serial.println(socketCmd);
                     webSocket.sendTXT(socketCmd);
                     socketCmd = "";
                 }
@@ -477,37 +503,47 @@ void loop() {
                     //send card uid
                     socketCmd += "42[\"wm_ask_for_run\",";
                     socketCmd += "{";
-                    socketCmd += "\"deviceID\":";
-                    socketCmd += deviceID;
-                    socketCmd += ",";
+                    socketCmd += "\"deviceID\":\"";
+                    /* Get deviceID from ESP ID chip */
+                    socketCmd += ESPID;
+                    socketCmd += "\",";
                     socketCmd += "\"cardID\":";
                     socketCmd += g_cardID;
                     socketCmd += "}]";
                     // send ping
-                    Serial.println(socketCmd);
+                    TRACE Serial.println(socketCmd);
                     webSocket.sendTXT(socketCmd);
-                    isRequested = true;
                     socketCmd = "";
                 }
                 else
                 {
                     if (curTime - g_prevSendPingTime >= SEND_PING_CMD)
                     {
+                        //timer0_detachInterrupt();
                         g_prevSendPingTime = curTime;
                         // g_pingSendCount++;
                         // webSocket.sendTXT("42[\"messageType\",{\"greeting\":\"hello\"}]");
                         socketCmd += "42[\"wm_ping\",";
                         socketCmd += "{";
-                        socketCmd += "\"deviceID\":";
-                        socketCmd += deviceID;
-                        socketCmd += "}]";
+                        socketCmd += "\"deviceID\":\"";
+                        /* Get deviceID from ESP ID chip */
+                        socketCmd += ESPID;
+                        socketCmd += "\"}]";
                         // send ping
-                        // Serial.println(socketCmd);
-                        webSocket.sendTXT(socketCmd);
-                        // Serial.println(ledCtrlData);
+                        TRACE Serial.println(socketCmd);
+                        //timer0_detachInterrupt();
+                        digitalWrite(LATCH_PIN, LOW);
+                        shiftOut(ledCtrlData);
+                        digitalWrite(LATCH_PIN, HIGH); 
+                        //webSocket.sendTXT(socketCmd);
+                        webSocket.sendTXT("1");
+                        //timer0_attachInterrupt(ledUpdate);
+                        //TRACE Serial.println(ledCtrlData);
                         socketCmd = "";
+                        //timer0_attachInterrupt(ledUpdate);
                     }
                 }
+                //timer0_attachInterrupt(ledUpdate);
             }
         }
     }
@@ -521,19 +557,16 @@ void loop() {
         }
         if (curTime - g_prevMinuteTime >= ONE_MINUTE)
         {
+            g_prevMinuteTime = curTime;
             if (g_washTime)
             {
+                digitUpdate(g_washTime);
                 g_washTime--;
-                g_prevMinuteTime = curTime;
-                g_led1 = (uint8_t)(g_washTime / 100);
-                g_led2 = (uint8_t)((g_washTime / 10) % 10);
-                g_led3 = (uint8_t)(g_washTime % 10);
             }
             if (g_washTime == 0)
             {
-                g_led1 = 0;
-                g_led2 = 0;
-                g_led3 = 0;
+                digitUpdate(0);
+                isRequested = true;
               //tagID= "A1F32F71F8B";
             }
         }
@@ -548,14 +581,15 @@ void loop() {
         {
             socketCmd += "42[\"wm_stop\",";
             socketCmd += "{";
-            socketCmd += "\"deviceID\":";
-            socketCmd += deviceID;
-            socketCmd += ",";
-            socketCmd += "\"cardID\":";
+            socketCmd += "\"deviceID\":\"";
+            /* Get deviceID from ESP ID chip */
+            socketCmd += ESPID;
+            socketCmd += "\",";
+            socketCmd += "\"cardID\":\"";
             socketCmd += g_cardID;
-            socketCmd += "}]";
+            socketCmd += "\"}]";
             // send stop msg
-            Serial.println(socketCmd);
+            TRACE Serial.println(socketCmd);
             webSocket.sendTXT(socketCmd);
             socketCmd = "";
         }
@@ -615,8 +649,6 @@ void setLedEnable(uint8_t pos, bool enable) // need to check pos (lllrrddd)
 
 void ledUpdate(void)
 {
-    timer0_write(ESP.getCycleCount()+600000);
-    // Serial.println("in led update");
     switch(ledPos){
         case 0: ledData = number[g_led1]; break;
         case 1: ledData = number[g_led2]; break;
@@ -634,7 +666,17 @@ void ledUpdate(void)
     shiftOut(ledCtrlData);
     shiftOut(ledData);
     digitalWrite(LATCH_PIN, HIGH);
+    //timer0_write(ESP.getCycleCount()+6000000);
+    //timer1_write(ESP.getCycleCount() + 1000);
 }
+
+void digitUpdate(uint32_t number)
+{
+    g_led1 = (uint8_t)(number / 100);
+    g_led2 = (uint8_t)((number / 10) % 10);
+    g_led3 = (uint8_t)(number % 10);
+}
+
 
 void shiftOut(byte myDataOut) {
   int i=0;
@@ -664,4 +706,12 @@ void shiftOut(byte myDataOut) {
 
   //stop shifting
   digitalWrite(CLK_PIN, 0);
+}
+
+String IpAddress2String(const IPAddress& ipAddress)
+{
+  return String(ipAddress[0]) + String(".") +\
+  String(ipAddress[1]) + String(".") +\
+  String(ipAddress[2]) + String(".") +\
+  String(ipAddress[3])  ; 
 }
